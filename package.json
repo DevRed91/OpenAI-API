@@ -1,6 +1,23 @@
 {
+  "name": "codex-test",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "tsx index.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
   "dependencies": {
     "dotenv": "^17.4.0",
-    "openai": "^6.33.0"
+    "openai": "^6.33.0",
+    "prettier": "^3.8.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.2"
   }
 }

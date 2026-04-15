@@ -1,16 +1,39 @@
 import OpenAI from "openai";
 import dotenv from "dotenv";
+import fs from "fs";
+import reviewAgent from "./src/reviewAgent";
+import taskAgent from "./src/taskAgent";
 dotenv.config();
 const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
 });
 
-const response = await client.chat.completions.create({
-    model: "gpt-5.2",
-    messages: [
-        { role: "system", content: "You are a helpful assistant" },
-        { role: "user", content: "Explain AI in simple terms" }
-    ],
-});
+async function main() {
+    const filePaths = [
+        // "/Users/devrajreddy/Commverse/commverse-studio-frontend/src/pages/virtual-store/components/CameraManager.tsx",
+        "/Users/devrajreddy/Commverse/commverse-studio-frontend/src/pages/virtual-store/components/ModelLoader.tsx"
+    ];
 
-console.log(response.choices[0].message.content);
+    try {
+        let combinedCode = "";
+
+        // 📥 Read files
+        for (const filePath of filePaths) {
+            if (fs.existsSync(filePath)) {
+                const content = fs.readFileSync(filePath, "utf8");
+                combinedCode += `\n--- FILE: ${filePath} ---\n${content}\n`;
+            } else {
+                console.error(`File not found: ${filePath}`);
+            }
+        }
+
+        if (!combinedCode) {
+            throw new Error("No code content found to review.");
+        }
+        taskAgent();
+    } catch (error: any) {
+        console.error("Error:", error.message);
+    }
+}
+
+main();
