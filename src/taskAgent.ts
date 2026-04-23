@@ -1,19 +1,45 @@
-import OpenAI from "openai";
-import dotenv from "dotenv";
-import fs from "fs";
+import dotenv from 'dotenv';
+import * as fs from 'fs';
+import * as z from 'zod';
+import { ChatOpenAI } from '@langchain/openai';
+import { createAgent, tool } from 'langchain';
+
 dotenv.config();
-const client = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
+
+// Define the refactoring result schema
+const refactoringSchema = z.object({
+   keyProblems: z.array(z.string()).describe('Identified architectural issues'),
+   strategy: z.string().describe('High-level refactoring approach'),
+   refactoredCode: z.string().describe('The refactored code'),
+   improvements: z.string().describe('Performance and maintainability benefits'),
+   furtherImprovements: z.array(z.string()).describe('Optional enhancements'),
 });
 
-async function taskAgent() {
-    const prompt = await client.responses.create({
-        model: "gpt-4.1-nano",
-        input: [
-            {
-                role: "system",
-                content: `
-You are a Senior Frontend Engineer with deep expertise in:
+// Tool to provide file content to the agent
+const getFileContent = tool(
+   async ({ filePath }: { filePath: string }) => {
+      if (fs.existsSync(filePath)) {
+         return fs.readFileSync(filePath, 'utf8');
+      }
+      return `File not found: ${filePath}`;
+   },
+   {
+      name: 'get_file_content',
+      description: 'Retrieve the content of a TypeScript/TSX file',
+      schema: z.object({
+         filePath: z.string().describe('Full path to the file'),
+      }),
+   }
+);
+
+const model = new ChatOpenAI({
+   model: 'gpt-4o',
+   apiKey: process.env.OPENAI_API_KEY,
+   temperature: 0.1,
+});
+
+async function taskAgent(filePaths: string[]) {
+   const systemPrompt = `You are a Senior Frontend Engineer with deep expertise in:
 - React (architecture, hooks, state management)
 - React Three Fiber (R3F) lifecycle and rendering behavior
 - Separation of concerns and scalable component design
@@ -21,9 +47,6 @@ You are a Senior Frontend Engineer with deep expertise in:
 - Performance optimization (CPU vs GPU in browser rendering)
 
 Your task:
-- Refactor the given code with a strong focus on separating ALL Reset-related logic into a clean, reusable, and maintainable structure.
-
-What to specifically do:
 1. Identify all "reset" responsibilities across the codebase:
    - State resets (React state, refs)
    - Scene resets (R3F objects, meshes, camera)
@@ -38,39 +61,42 @@ What to specifically do:
 3. Eliminate anti-patterns:
    - Duplicate reset logic
    - Inline reset code inside components
-   - Tight coupling between unrelated systems (UI ↔ scene ↔ camera)
+   - Tight coupling between unrelated systems
 
-4. Improve architecture:
-   - Ensure single responsibility per module
-   - Make reset flows predictable and composable
-   - Enable partial resets (not just global reset)
+4. Provide refactored code with clear explanations.`;
 
-5. Provide:
-   - Refactored code
-   - Clear explanation of structure
-   - Before vs After comparison
-   - Reasoning for each major change
+   const agent = createAgent({
+      model,
+      tools: [getFileContent],
+      systemPrompt,
+      responseFormat: refactoringSchema,
+   });
 
-Rules:
-- Be highly practical and implementation-focused
-- Avoid generic advice
-- Prefer clean abstractions over quick fixes
-- Maintain performance (avoid unnecessary re-renders in React / R3F)
-- Clearly separate React concerns vs Three.js/WebGL concerns
-
-Output format:
-1. Key Problems Identified
-2. Refactoring Strategy
-3. Refactored Code
-4. Why This is Better (performance + maintainability)
-5. Optional Further Improvements
-      `.trim(),
+   try {
+      const fileList = filePaths.join(', ');
+      const result = await agent.invoke({
+         messages: [
+            {
+               role: 'user',
+               content: `Analyze and refactor these files for better reset logic separation: ${fileList}. 
+                    
+                    Please provide:
+                    1. Key Problems Identified
+                    2. Refactoring Strategy
+                    3. Refactored Code
+                    4. Why This is Better
+                    5. Optional Further Improvements`,
             },
-        ],
-    });
+         ],
+      });
 
-    console.log(prompt.output_text);
-    return null;
+      const response = result.messages.at(-1)?.content;
+      console.log('Agent Analysis:', response);
+      return response;
+   } catch (error) {
+      console.error('Task Agent Error:', error);
+      throw error;
+   }
 }
 
 export default taskAgent;
