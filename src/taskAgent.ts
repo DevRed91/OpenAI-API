@@ -2,7 +2,6 @@ import dotenv from 'dotenv';
 import * as fs from 'fs';
 import * as z from 'zod';
 import { ChatOpenAI } from '@langchain/openai';
-import { createAgent, tool } from 'langchain';
 
 dotenv.config();
 
@@ -15,84 +14,139 @@ const refactoringSchema = z.object({
    furtherImprovements: z.array(z.string()).describe('Optional enhancements'),
 });
 
-// Tool to provide file content to the agent
-const getFileContent = tool(
-   async ({ filePath }: { filePath: string }) => {
-      if (fs.existsSync(filePath)) {
-         return fs.readFileSync(filePath, 'utf8');
-      }
-      return `File not found: ${filePath}`;
-   },
-   {
-      name: 'get_file_content',
-      description: 'Retrieve the content of a TypeScript/TSX file',
-      schema: z.object({
-         filePath: z.string().describe('Full path to the file'),
-      }),
-   }
-);
+const gpt35 = new ChatOpenAI({
+   model: 'gpt-3.5-turbo',
+   apiKey: process.env.OPENAI_API_KEY,
+   temperature: 0.1,
+});
 
-const model = new ChatOpenAI({
+const gpt4 = new ChatOpenAI({
    model: 'gpt-4o',
    apiKey: process.env.OPENAI_API_KEY,
    temperature: 0.1,
 });
 
+// Step 1: Fast contextualization with GPT-3.5
+async function contextualizeQuery(filePaths: string[]) {
+   const response = await gpt35.invoke([
+      {
+         role: 'user',
+         content: `Analyze what's needed: ${filePaths.join(', ')}
+      
+      Identify:
+      1. File types and purposes
+      2. Key refactoring areas (reset logic, state management, etc.)
+      3. Priority level (high/medium/low)
+      
+      Be concise.`,
+      },
+   ]);
+
+   return response.content as string;
+}
+
+// Retrieval: Pure file system I/O (no LLM)
+async function retrieveFileContent(filePaths: string[]) {
+   return Promise.all(
+      filePaths.map((path) =>
+         fs.promises.readFile(path, 'utf8').catch(() => `File not found: ${path}`)
+      )
+   );
+}
+
+// Reasoning: Fast GPT-3.5 analysis
+async function analyzeRefactoringNeeds(context: string) {
+   const response = await gpt35.invoke([
+      {
+         role: 'user',
+         content: `Based on: ${context}
+      
+      Provide metadata:
+      - primary_issue: (string)
+      - refactoring_type: (enum: 'state_management' | 'logic_extraction' | 'hook_separation' | 'other')
+      - complexity: (enum: 'low' | 'medium' | 'high')
+      - estimated_scope: (enum: 'single_file' | 'multi_file' | 'full_codebase')
+      
+      JSON format only.`,
+      },
+   ]);
+
+   // Ensure we only parse the JSON part if there's markdown wrapping
+   const content = (response.content as string).replace(/```json|```/g, '').trim();
+   return JSON.parse(content);
+}
+
+// Step 2: Run retrieval and reasoning in parallel
+async function parallelPreprocessing(filePaths: string[], context: string) {
+   const [retrievedContent, analysisMetadata] = await Promise.all([
+      // Path A: Retrieval (file system lookup)
+      retrieveFileContent(filePaths),
+
+      // Path B: Reasoning (GPT-3.5 analysis)
+      analyzeRefactoringNeeds(context),
+   ]);
+
+   return { retrievedContent, analysisMetadata };
+}
+
+// Step 3: Final synthesis with GPT-4
+async function synthesizeRefactoredCode(
+   fileContents: string[],
+   analysisMetadata: any,
+   contextSummary: string
+) {
+   const systemPrompt = `You are a Senior Frontend Engineer.
+Task: Refactor provided code based on pre-analysis metadata.
+Focus: ${analysisMetadata.primary_issue}
+Complexity level: ${analysisMetadata.complexity}`;
+
+   const response = await gpt4.invoke([
+      {
+         role: 'system',
+         content: systemPrompt,
+      },
+      {
+         role: 'user',
+         content: `Pre-analysis indicates:
+- Issue: ${analysisMetadata.primary_issue}
+- Type: ${analysisMetadata.refactoring_type}
+- Scope: ${analysisMetadata.estimated_scope}
+- Context Summary: ${contextSummary}
+
+Code files:
+${fileContents.map((content, i) => `File ${i + 1}:\n${content}`).join('\n---\n')}
+
+Provide refactored code with explanations using the schema: ${JSON.stringify(refactoringSchema)}`,
+      },
+   ]);
+
+   return response.content;
+}
+
+// Step 4: Main task agent function
 async function taskAgent(filePaths: string[]) {
-   const systemPrompt = `You are a Senior Frontend Engineer with deep expertise in:
-- React (architecture, hooks, state management)
-- React Three Fiber (R3F) lifecycle and rendering behavior
-- Separation of concerns and scalable component design
-- Code maintainability, readability, and reusability
-- Performance optimization (CPU vs GPU in browser rendering)
-
-Your task:
-1. Identify all "reset" responsibilities across the codebase:
-   - State resets (React state, refs)
-   - Scene resets (R3F objects, meshes, camera)
-   - UI resets (controls, selections, forms)
-   - Side effects (effects, subscriptions, listeners)
-
-2. Extract reset logic into:
-   - Dedicated hooks (e.g., useResetScene, useResetCamera)
-   - Utility functions where appropriate
-   - Clearly defined boundaries (no mixed concerns)
-
-3. Eliminate anti-patterns:
-   - Duplicate reset logic
-   - Inline reset code inside components
-   - Tight coupling between unrelated systems
-
-4. Provide refactored code with clear explanations.`;
-
-   const agent = createAgent({
-      model,
-      tools: [getFileContent],
-      systemPrompt,
-      responseFormat: refactoringSchema,
-   });
-
    try {
-      const fileList = filePaths.join(', ');
-      const result = await agent.invoke({
-         messages: [
-            {
-               role: 'user',
-               content: `Analyze and refactor these files for better reset logic separation: ${fileList}. 
-                    
-                    Please provide:
-                    1. Key Problems Identified
-                    2. Refactoring Strategy
-                    3. Refactored Code
-                    4. Why This is Better
-                    5. Optional Further Improvements`,
-            },
-         ],
-      });
+      // Step 1: Quick contextualization (GPT-3.5)
+      console.log('📋 Contextualizing query...');
+      const contextSummary = await contextualizeQuery(filePaths);
 
-      const response = result.messages.at(-1)?.content;
-      console.log('Agent Analysis:', response);
-      return response;
+      // Step 2: Parallel retrieval + reasoning (No token waste)
+      console.log('⚡ Parallel processing...');
+      const { retrievedContent, analysisMetadata } = await parallelPreprocessing(
+         filePaths,
+         contextSummary
+      );
+
+      // Step 3: Final synthesis (GPT-4 only)
+      console.log('🧠 Synthesizing refactored code...');
+      const result = await synthesizeRefactoredCode(
+         retrievedContent,
+         analysisMetadata,
+         contextSummary
+      );
+
+      console.log('✅ Refactoring complete');
+      return result;
    } catch (error) {
       console.error('Task Agent Error:', error);
       throw error;
