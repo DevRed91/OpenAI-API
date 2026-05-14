@@ -1,45 +1,148 @@
-import OpenAI from "openai";
-import dotenv from "dotenv";
-import fs from "fs";
+// import OpenAI from "openai";
+import { Annotation, StateGraph, START, END } from "@langchain/langgraph";
+import { readFile } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { ChatOpenAI } from "@langchain/openai";
+import dotenv from 'dotenv';
+
 dotenv.config();
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
 
-async function reviewAgent() {
-  const prompt = await client.responses.create({
-    model: "gpt-5.2-pro",
-    input: [
-      {
-        role: "system",
-        content: `
-Your expertise includes:
-- React Three Fiber (R3F) rendering lifecycle
-- Three.js / WebGL performance constraints
-- GPU vs CPU bottlenecks in browser rendering
-- React reconciliation and re-render costs
-- VRAM usage, textures, and memory management
-- Draw calls, instancing, batching
-- Shader/material performance
-- Scene graph optimization
-
-Your job:
-- Review the camera focusOnMesh function and check for the improvements implemented
-
-Rules:
-- Be precise and technical
-- Avoid generic advice
-- Clearly distinguish React vs WebGL bottlenecks
-- Focus on real-world performance impact (FPS, memory, load time)
-- Prefer actionable fixes with code suggestions over theory
-- Call out anti-patterns specific to React Three Fiber
-      `.trim(),
-      },
-    ],
-  });
-
-  console.log(prompt.output_text);
-  return null;
+async function getReviewSystemPrompt() {
+  const promptPath = join(process.cwd(), "Babylon_Prompt_review.md");
+  return (await readFile(promptPath, "utf8")).trim();
 }
 
-export default reviewAgent;
+const reviewer = new ChatOpenAI({
+  model: 'gpt-5-mini',
+  apiKey: process.env.OPENAI_API_KEY,
+  temperature: 1,
+});
+
+const evaluator = new ChatOpenAI({
+  model: 'gpt-5-nano',
+  apiKey: process.env.OPENAI_API_KEY,
+  temperature: 1,
+});
+
+const ReviewState = Annotation.Root({
+  systemPrompt: Annotation<string>({
+    reducer: (_, update) => update,
+    default: () => "",
+  }),
+  filePaths: Annotation<string[]>({
+    reducer: (_, update) => update,
+    default: () => [],
+  }),
+  fileContents: Annotation<string>({
+    reducer: (_, update) => update,
+    default: () => "",
+  }),
+  gpuReview: Annotation<string>({
+    reducer: (_, update) => update,
+    default: () => "",
+  }),
+  suggestionEvaluation: Annotation<string>({
+    reducer: (_, update) => update,
+    default: () => "",
+  }),
+  finalReport: Annotation<string>({
+    reducer: (_, update) => update,
+    default: () => "",
+  }),
+});
+
+async function loadFiles(filePaths: string[]) {
+  const chunks = await Promise.all(
+    filePaths.map(async (filePath) => {
+      const content = await readFile(filePath, "utf8");
+      return `FILE: ${basename(filePath)}\nPATH: ${filePath}\n\`\`\`\n${content}\n\`\`\``;
+    })
+  );
+
+  return chunks.join("\n\n");
+}
+
+async function inspectCodebaseNode(state: typeof ReviewState.State) {
+  const fileContents =
+    state.fileContents || (await loadFiles(state.filePaths));
+  const response = await reviewer.invoke([
+    {
+      role: "system",
+      content: state.systemPrompt,
+    },
+    {
+      role: 'user',
+      content: `Phase 1 only.
+
+  Review this codebase for Babylon.js GPU bottlenecks.
+  Identify the highest-impact GPU issues first, then separate non-GPU findings.
+
+  Codebase:${fileContents}`,
+    },
+  ]);
+
+  return {
+    gpuReview: response.text,
+  };
+}
+
+async function evaluateSuggestionsNode(state: typeof ReviewState.State) {
+  const response = await evaluator.invoke([
+    {
+      role: "system",
+      content: state.systemPrompt,
+    },
+    {
+      role: 'user',
+      content: `Based on: ${state.gpuReview}
+      
+      Now evaluate whether the suggestions for improving the codebase actually address those bottlenecks.
+      Be strict and technical:
+      - mark each suggestion as effective, partially effective, ineffective, or unverified
+      - explain why
+      - estimate likely impact on FPS, frame time, VRAM, or load time
+      - point out missing Babylon.js-specific fixes
+      
+      Codebase:
+      ${state.fileContents}
+      `.trim(),
+    },
+  ]);
+  return {
+    suggestionEvaluation: response.text,
+  };
+}
+
+async function finalizeNode(state: typeof ReviewState.State) {
+  return {
+    finalReport: `
+${state.gpuReview}
+
+---
+
+${state.suggestionEvaluation}
+    `.trim(),
+  };
+}
+
+const reviewGraph = new StateGraph(ReviewState)
+  .addNode("inspectCodebase", inspectCodebaseNode)
+  .addNode("evaluateSuggestions", evaluateSuggestionsNode)
+  .addNode("finalize", finalizeNode)
+  .addEdge(START, "inspectCodebase")
+  .addEdge("inspectCodebase", "evaluateSuggestions")
+  .addEdge("evaluateSuggestions", "finalize")
+  .addEdge("finalize", END)
+  .compile();
+
+export async function reviewAgent(filePaths: string[]) {
+  const systemPrompt = await getReviewSystemPrompt();
+
+  const result = await reviewGraph.invoke({
+    systemPrompt,
+    filePaths,
+  });
+
+  console.log(result.finalReport);
+  return result.finalReport;
+}

@@ -1,13 +1,16 @@
 import dotenv from 'dotenv';
 import * as fs from 'fs';
-import taskAgent from './src/taskAgent';
+// import refactorAgent from './src/refactorAgent';
+import { reviewAgent } from './src/reviewAgent';
 
 
 dotenv.config();
 
 async function main() {
     const filePaths = [
-        '/Users/devrajreddy/Commverse/commverse-studio-frontend/src/pages/virtual-store/components/ModelLoader.tsx',
+        'C:/Projects/Obeya_v1-experiement-office_template/Obeya_v1-experiement-office_template/src/3D/EditorLogic/SceneTransitionSystem.ts',
+        'C:/Projects/Obeya_v1-experiement-office_template/Obeya_v1-experiement-office_template/src/3D/EditorLogic/editor.ts',
+        // 'C:/Projects/Obeya_v1-experiement-office_template/Obeya_v1-experiement-office_template/src/3D/EditorLogic/XRSystem.ts'
     ];
 
     try {
@@ -19,7 +22,8 @@ async function main() {
         }
 
         // Run the agent-based refactoring task
-        const analysis = await taskAgent(filePaths);
+        // const analysis = await refactorAgent(filePaths);
+        const analysis = await reviewAgent(filePaths);
         console.log('\n--- Refactoring Complete ---');
         console.log(analysis);
     } catch (error: any) {
