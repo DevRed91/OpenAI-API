@@ -1,7 +1,9 @@
 import dotenv from 'dotenv';
 import * as fs from 'fs';
+import * as path from 'path';
 import * as z from 'zod';
 import { ChatOpenAI } from '@langchain/openai';
+import { getRefactorSystemPrompt } from './utils/utils';
 
 dotenv.config();
 
@@ -9,10 +11,23 @@ dotenv.config();
 const refactoringSchema = z.object({
    keyProblems: z.array(z.string()).describe('Identified architectural issues'),
    strategy: z.string().describe('High-level refactoring approach'),
-   refactoredCode: z.string().describe('The refactored code'),
+   updatedFiles: z.array(
+      z.object({
+         filePath: z.string().describe('Absolute path to the updated file'),
+         updatedCode: z.string().describe('Full updated file contents'),
+         changeSummary: z.string().describe('Summary of the applied change'),
+      })
+   ).describe('Files that were modified'),
    improvements: z.string().describe('Performance and maintainability benefits'),
    furtherImprovements: z.array(z.string()).describe('Optional enhancements'),
 });
+
+type RefactoringResult = z.infer<typeof refactoringSchema>;
+
+type FileContent = {
+   filePath: string;
+   content: string;
+};
 
 const gpt35 = new ChatOpenAI({
    model: 'gpt-3.5-turbo',
@@ -27,18 +42,21 @@ const gpt4 = new ChatOpenAI({
 });
 
 // Step 1: Fast contextualization with GPT-3.5
-async function contextualizeQuery(filePaths: string[]) {
+async function contextualizeQuery(prompt: string, filePaths: string[]) {
    const response = await gpt35.invoke([
       {
          role: 'user',
-         content: `Analyze what's needed: ${filePaths.join(', ')}
-      
-      Identify:
-      1. File types and purposes
-      2. Key refactoring areas (reset logic, state management, etc.)
-      3. Priority level (high/medium/low)
-      
-      Be concise.`,
+         content: `Analyze the requested change:
+
+        Request: ${prompt}
+        Files: ${filePaths.join(', ')}
+       
+       Identify:
+       1. File types and purposes
+       2. Key refactoring areas needed to satisfy the request
+       3. Priority level (high/medium/low)
+       
+       Be concise.`,
       },
    ]);
 
@@ -46,23 +64,30 @@ async function contextualizeQuery(filePaths: string[]) {
 }
 
 // Retrieval: Pure file system I/O (no LLM)
-async function retrieveFileContent(filePaths: string[]) {
+async function retrieveFileContent(filePaths: string[]): Promise<FileContent[]> {
    return Promise.all(
-      filePaths.map((path) =>
-         fs.promises.readFile(path, 'utf8').catch(() => `File not found: ${path}`)
+      filePaths.map((filePath) =>
+         fs.promises.readFile(filePath, 'utf8').then((content) => ({ filePath, content }))
       )
    );
 }
 
+function normalizeFilePath(filePath: string) {
+   return path.resolve(filePath).toLowerCase();
+}
+
 // Reasoning: Fast GPT-3.5 analysis
-async function analyzeRefactoringNeeds(context: string) {
+async function analyzeRefactoringNeeds(prompt: string, context: string) {
    const response = await gpt35.invoke([
       {
          role: 'user',
-         content: `Based on: ${context}
-      
-      Provide metadata:
-      - primary_issue: (string)
+         content: `Based on the request and context below:
+
+        Request: ${prompt}
+        Context: ${context}
+       
+       Provide metadata:
+       - primary_issue: (string)
       - refactoring_type: (enum: 'state_management' | 'logic_extraction' | 'hook_separation' | 'other')
       - complexity: (enum: 'low' | 'medium' | 'high')
       - estimated_scope: (enum: 'single_file' | 'multi_file' | 'full_codebase')
@@ -77,13 +102,13 @@ async function analyzeRefactoringNeeds(context: string) {
 }
 
 // Step 2: Run retrieval and reasoning in parallel
-async function parallelPreprocessing(filePaths: string[], context: string) {
+async function parallelPreprocessing(filePaths: string[], prompt: string, context: string) {
    const [retrievedContent, analysisMetadata] = await Promise.all([
       // Path A: Retrieval (file system lookup)
       retrieveFileContent(filePaths),
 
       // Path B: Reasoning (GPT-3.5 analysis)
-      analyzeRefactoringNeeds(context),
+      analyzeRefactoringNeeds(prompt, context),
    ]);
 
    return { retrievedContent, analysisMetadata };
@@ -91,14 +116,15 @@ async function parallelPreprocessing(filePaths: string[], context: string) {
 
 // Step 3: Final synthesis with GPT-4
 async function synthesizeRefactoredCode(
-   fileContents: string[],
+   files: FileContent[],
    analysisMetadata: any,
+   prompt: string,
    contextSummary: string
-) {
+): Promise<RefactoringResult> {
    const systemPrompt = `You are a Senior Frontend Engineer.
-Task: Refactor provided code based on pre-analysis metadata.
-Focus: ${analysisMetadata.primary_issue}
-Complexity level: ${analysisMetadata.complexity}`;
+ Task: Refactor provided code based on the request and pre-analysis metadata.
+ Focus: ${analysisMetadata.primary_issue}
+ Complexity level: ${analysisMetadata.complexity}`;
 
    const response = await gpt4.invoke([
       {
@@ -107,33 +133,67 @@ Complexity level: ${analysisMetadata.complexity}`;
       },
       {
          role: 'user',
-         content: `Pre-analysis indicates:
-- Issue: ${analysisMetadata.primary_issue}
-- Type: ${analysisMetadata.refactoring_type}
-- Scope: ${analysisMetadata.estimated_scope}
-- Context Summary: ${contextSummary}
+         content: `Request:
+${prompt}
+
+Pre-analysis indicates:
+ - Issue: ${analysisMetadata.primary_issue}
+ - Type: ${analysisMetadata.refactoring_type}
+ - Scope: ${analysisMetadata.estimated_scope}
+ - Context Summary: ${contextSummary}
 
 Code files:
-${fileContents.map((content, i) => `File ${i + 1}:\n${content}`).join('\n---\n')}
+${files.map(({ filePath, content }, i) => `File ${i + 1}: ${filePath}\n${content}`).join('\n---\n')}
 
-Provide refactored code with explanations using the schema: ${JSON.stringify(refactoringSchema)}`,
+Return JSON only with these top-level keys:
+- keyProblems: string[]
+- strategy: string
+- updatedFiles: [{ filePath: string, updatedCode: string, changeSummary: string }]
+- improvements: string
+- furtherImprovements: string[]
+
+Only include files from the provided input set and return full file contents for each updated file.`,
       },
    ]);
 
-   return response.content;
+   const content = (response.content as string).replace(/```json|```/g, '').trim();
+   return refactoringSchema.parse(JSON.parse(content));
+}
+
+function validateUpdatedFiles(result: RefactoringResult, files: FileContent[]) {
+   const allowedFiles = new Set(files.map((file) => normalizeFilePath(file.filePath)));
+
+   for (const file of result.updatedFiles) {
+      if (!allowedFiles.has(normalizeFilePath(file.filePath))) {
+         throw new Error(`Refactor output referenced an unexpected file: ${file.filePath}`);
+      }
+   }
+}
+
+async function writeRefactoredFiles(result: RefactoringResult) {
+   const writtenFiles = await Promise.all(
+      result.updatedFiles.map(async (file) => {
+         await fs.promises.writeFile(file.filePath, file.updatedCode, 'utf8');
+         return file.filePath;
+      })
+   );
+
+   return writtenFiles;
 }
 
 // Step 4: Main task agent function
 async function refactorAgent(filePaths: string[]) {
+   const reviewPrompt = await getRefactorSystemPrompt("");
    try {
       // Step 1: Quick contextualization (GPT-3.5)
       console.log('📋 Contextualizing query...');
-      const contextSummary = await contextualizeQuery(filePaths);
+      const contextSummary = await contextualizeQuery(reviewPrompt, filePaths);
 
       // Step 2: Parallel retrieval + reasoning (No token waste)
       console.log('⚡ Parallel processing...');
       const { retrievedContent, analysisMetadata } = await parallelPreprocessing(
          filePaths,
+         reviewPrompt,
          contextSummary
       );
 
@@ -142,11 +202,20 @@ async function refactorAgent(filePaths: string[]) {
       const result = await synthesizeRefactoredCode(
          retrievedContent,
          analysisMetadata,
+         reviewPrompt,
          contextSummary
       );
 
+      validateUpdatedFiles(result, retrievedContent);
+
+      console.log('✍️ Writing updates to shared files...');
+      const writtenFiles = await writeRefactoredFiles(result);
+
       console.log('✅ Refactoring complete');
-      return result;
+      return {
+         ...result,
+         writtenFiles,
+      };
    } catch (error) {
       console.error('Task Agent Error:', error);
       throw error;

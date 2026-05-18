@@ -1,16 +1,14 @@
 // import OpenAI from "openai";
 import { Annotation, StateGraph, START, END } from "@langchain/langgraph";
 import { readFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 import { ChatOpenAI } from "@langchain/openai";
 import dotenv from 'dotenv';
+import { getReviewSystemPrompt } from "./utils/utils";
 
 dotenv.config();
 
-async function getReviewSystemPrompt() {
-  const promptPath = join(process.cwd(), "Babylon_Prompt_review.md");
-  return (await readFile(promptPath, "utf8")).trim();
-}
+
 
 const reviewer = new ChatOpenAI({
   model: 'gpt-5-mini',
@@ -22,6 +20,7 @@ const evaluator = new ChatOpenAI({
   model: 'gpt-5-nano',
   apiKey: process.env.OPENAI_API_KEY,
   temperature: 1,
+
 });
 
 const ReviewState = Annotation.Root({
@@ -136,7 +135,7 @@ const reviewGraph = new StateGraph(ReviewState)
   .compile();
 
 export async function reviewAgent(filePaths: string[]) {
-  const systemPrompt = await getReviewSystemPrompt();
+  const systemPrompt = await getReviewSystemPrompt("Babylon_Prompt_review.md");
 
   const result = await reviewGraph.invoke({
     systemPrompt,

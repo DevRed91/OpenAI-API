@@ -1,7 +1,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import refactorAgent from './refactorAgent'; // Your existing agent logic
+import refactorAgent from './refactorAgent.js'; // Your existing agent logic
 
 const server = new Server({
     name: "refactor-agent",
@@ -18,23 +18,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         inputSchema: {
             type: "object",
             properties: {
+                prompt: {
+                    type: "string",
+                    description: "Instructions describing the changes to make across the shared files"
+                },
                 filePaths: {
                     type: "array",
                     items: { type: "string" },
                     description: "Absolute paths to files to refactor"
                 }
             },
-            required: ["filePaths"]
+            required: ["prompt", "filePaths"]
         }
-    }]
+    }] 
 }));
 
 // Execute the taskAgent logic when called
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (request.params.name === "deep_refactor") {
-        const { filePaths } = request.params.arguments as { filePaths: string[] };
+        const { prompt, filePaths } = request.params.arguments as { prompt: string, filePaths: string[] };
         try {
-            const result = await refactorAgent(filePaths);
+            const result = await refactorAgent(prompt, filePaths);
             return {
                 content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
             };
